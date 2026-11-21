@@ -1,0 +1,46 @@
+# 打包发布：推送 v* 标签（如 v1.0.0）后自动构建安装包并发布到 GitHub Release
+# 手动触发：在仓库 Actions 页点 Run workflow，填版本号
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "版本号（例如 v1.0.0）"
+        required: true
+        default: "v1.0.0"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 检查代码
+        run: node --check src/worker.js
+
+      - name: 打包安装包
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME}"
+          fi
+          mkdir -p tg-imagebed-pro
+          cp -r README.md package.json public schema.sql src wrangler.toml tg-imagebed-pro/
+          zip -r "tg-imagebed-pro-${VERSION}.zip" tg-imagebed-pro
+          ls -la tg-imagebed-pro-*.zip
+
+      - name: 发布到 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+          name: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+          files: tg-imagebed-pro-*.zip
+          generate_release_notes: true
