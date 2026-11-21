@@ -530,7 +530,9 @@ updateBatch()}
 function toggleSelect(id){if(selected.has(id))selected.delete(id);else selected.add(id);render()}
 function updateBatch(){const n=selected.size;$('#batchbar').classList.toggle('hidden',n===0);$('#batchCount').textContent=`已选择 ${n} 张`}
 async function copyText(text,msg){try{await navigator.clipboard.writeText(text)}catch(e){const ta=document.createElement('textarea');ta.value=text;document.body.appendChild(ta);ta.select();document.execCommand('copy');ta.remove()}toast(msg||'已复制')}
-async function deleteIds(ids){if(!ids.length)return;if(!confirm(`确定删除所选 ${ids.length} 张图片？`))return;try{const d=await call('/api/delete',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({ids})});toast(`已隐藏 ${d.hidden} 张，Telegram 删除成功 ${d.deleted} 张`);selected.clear();await loadStats();await load()}catch(e){alert(e.message)}}
+async function deleteIds(ids){if(!ids.length)return;if(!confirm(`确定删除所选 ${ids.length} 张图片？`))return;
+const set=new Set(ids);items=items.filter(x=>!set.has(x.id));selected.clear();render();
+try{const d=await call('/api/delete',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({ids})});toast(`已隐藏 ${d.hidden} 张，Telegram 删除成功 ${d.deleted} 张`);await loadStats();await load()}catch(e){alert(e.message);await load()}}
 /* 大图预览 */
 let lbIndex=-1;
 function openLightbox(id){const list=sortedItems();lbIndex=list.findIndex(x=>x.id===id);if(lbIndex<0)return;showLb()}

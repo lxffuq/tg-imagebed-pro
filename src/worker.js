@@ -232,25 +232,36 @@ async function api(request, env, ctx) {
     const body = await request.json().catch(() => ({}));
     const ids = [...new Set((Array.isArray(body.ids) ? body.ids : []).filter(x => typeof x === "string"))].slice(0, 100);
     if (!ids.length) return err("没有选择图片");
-    let deleted = 0, queued = 0;
-    for (const id of ids) {
-      const row = await env.DB.prepare("SELECT * FROM images WHERE id = ? AND status = 'active'").bind(id).first();
-      if (!row) continue;
-      // Hide it from the UI immediately, even if Telegram deletion needs retry.
-      await env.DB.prepare("UPDATE images SET status='deleting' WHERE id=?").bind(id).run();
-      const cacheKey = new Request(`${url.origin}/i/${id}`);
-      ctx.waitUntil(caches.default.delete(cacheKey));
-      try {
-        if (!cfg.botToken) throw new Error("未绑定 Telegram 机器人，请先在设置里绑定");
-        const r = await fetch(telegram(cfg.botToken, "deleteMessage"), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ chat_id: row.telegram_chat_id, message_id: row.telegram_message_id }) });
-        const j = await r.json();
-        if (!j.ok && !/message to delete not found/i.test(j.description || "")) throw new Error(j.description || "Telegram删除失败");
-        await env.DB.prepare("DELETE FROM images WHERE id=?").bind(id).run(); deleted++;
-      } catch (e) {
-        await env.DB.prepare("UPDATE images SET delete_error=? WHERE id=?").bind(String(e.message).slice(0, 500), id).run(); queued++;
-      }
+    // 一次查出全部行、一次批量标为 deleting（列表只显示 active，立即隐藏）
+    const placeholders = ids.map(() => "?").join(",");
+    const { results: rows = [] } = await env.DB.prepare(`SELECT * FROM images WHERE id IN (${placeholders}) AND status='active'`).bind(...ids).all();
+    if (rows.length) {
+      await env.DB.batch(rows.map(r => env.DB.prepare("UPDATE images SET status='deleting' WHERE id=?").bind(r.id)));
+      // 清缓存：serveImage 用的是 ?v=2 的键，旧键也一起清
+      ctx.waitUntil(Promise.all(rows.flatMap(r => [
+        caches.default.delete(new Request(`${url.origin}/i/${r.id}?v=2`)),
+        caches.default.delete(new Request(`${url.origin}/i/${r.id}`)),
+      ])));
     }
-    return json({ deleted, queued, hidden: ids.length });
+    if (!cfg.botToken) {
+      if (rows.length) await env.DB.batch(rows.map(r => env.DB.prepare("UPDATE images SET delete_error=? WHERE id=?").bind("未绑定 Telegram 机器人，请先在设置里绑定", r.id)));
+      return json({ deleted: 0, queued: rows.length, hidden: ids.length });
+    }
+    // Telegram 删除并行发，不再一张一张等
+    const settled = await Promise.allSettled(rows.map(async (row) => {
+      const r = await fetch(telegram(cfg.botToken, "deleteMessage"), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ chat_id: row.telegram_chat_id, message_id: row.telegram_message_id }) });
+      const j = await r.json();
+      if (!j.ok && !/message to delete not found/i.test(j.description || "")) throw new Error(j.description || "Telegram删除失败");
+      return row.id;
+    }));
+    const okIds = [], failList = [];
+    settled.forEach((s, i) => { if (s.status === "fulfilled") okIds.push(rows[i].id); else failList.push({ id: rows[i].id, error: String(s.reason?.message || s.reason || "Telegram删除失败").slice(0, 500) }); });
+    const stmts = [
+      ...okIds.map(id => env.DB.prepare("DELETE FROM images WHERE id=?").bind(id)),
+      ...failList.map(f => env.DB.prepare("UPDATE images SET delete_error=? WHERE id=?").bind(f.error, f.id)),
+    ];
+    if (stmts.length) await env.DB.batch(stmts);
+    return json({ deleted: okIds.length, queued: failList.length, hidden: ids.length });
   }
   return err("Not found", 404);
 }
