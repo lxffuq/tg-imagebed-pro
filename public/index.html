@@ -234,7 +234,7 @@ html.dark{--glass-bg:rgba(22,33,58,.55);--glass-border:rgba(255,255,255,.14);--g
       <p>支持 JPG、PNG、WebP 等格式，单张最大 20MB，每次最多 20 张</p>
       <input id="files" type="file" accept="image/*" multiple class="hidden">
       <button id="choose" class="primary"><svg viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>选择文件</button>
-      <div class="compress-row"><label><input id="compressToggle" type="checkbox" checked> 上传前压缩</label><select id="compressQuality"><option value="high">高清</option><option value="mid" selected>均衡</option><option value="low">省流</option></select><select id="compressFormat"><option value="auto" selected>自动</option><option value="jpg">JPG</option><option value="webp">WebP</option><option value="png">PNG</option></select></div>
+      <div class="compress-row"><label><input id="compressToggle" type="checkbox" checked> 上传前压缩</label><select id="compressQuality"><option value="high">高清</option><option value="mid" selected>均衡</option><option value="low">省流</option></select></div>
       <div id="uploadNotice" class="notice"></div>
       <div id="uploadProgress" class="hidden">
         <div class="up-bar"><div id="uploadBarFill"></div></div>
@@ -430,32 +430,23 @@ async function compressImage(file){
   if(!$('#compressToggle').checked)return plain;
   const m=/^image\/(jpeg|png|webp|heic|heif)$/i.exec(file.type||'');if(!m)return plain;
   const preset={high:{quality:.9,max:2560},mid:{quality:.8,max:1920},low:{quality:.65,max:1280}}[$('#compressQuality').value]||{quality:.8,max:1920};
-  const fmtSel=$('#compressFormat').value;
   let bmp;try{bmp=await createImageBitmap(file)}catch(e){return plain}
   const scale=Math.min(1,preset.max/Math.max(bmp.width,bmp.height));
   const w=Math.max(1,Math.round(bmp.width*scale)),h=Math.max(1,Math.round(bmp.height*scale));
   const cv=document.createElement('canvas');cv.width=w;cv.height=h;
   const ctx=cv.getContext('2d');
-  const outType=fmtSel==='jpg'?'image/jpeg':fmtSel==='webp'?'image/webp':fmtSel==='png'?'image/png':(m[1].toLowerCase()==='jpeg'?'image/jpeg':'image/webp');
+  const outType=m[1].toLowerCase()==='jpeg'?'image/jpeg':'image/webp';
   if(outType==='image/jpeg'){ctx.fillStyle='#fff';ctx.fillRect(0,0,w,h)}
   ctx.drawImage(bmp,0,0,w,h);bmp.close();
   const blob=await new Promise(res=>{try{cv.toBlob(res,outType,preset.quality)}catch(e){res(null)}});
   if(!blob)return {...plain,failed:true};
   if(blob.size>=file.size)return plain;
-  const ext={'image/jpeg':'.jpg','image/webp':'.webp','image/png':'.png'}[outType];
+  const ext=outType==='image/jpeg'?'.jpg':'.webp';
   return {blob,name:file.name.replace(/\.[^.]+$/,'')+ext,saved:file.size-blob.size};
 }
-try{const c=localStorage.getItem('tgib_compress');if(c!==null)$('#compressToggle').checked=c==='1';const q=localStorage.getItem('tgib_compress_q');if(q)$('#compressQuality').value=q;const f=localStorage.getItem('tgib_compress_fmt');if(f)$('#compressFormat').value=f}catch(e){}
+try{const c=localStorage.getItem('tgib_compress');if(c!==null)$('#compressToggle').checked=c==='1';const q=localStorage.getItem('tgib_compress_q');if(q)$('#compressQuality').value=q}catch(e){}
 $('#compressToggle').onchange=e=>{try{localStorage.setItem('tgib_compress',e.target.checked?'1':'0')}catch(err){}};
 $('#compressQuality').onchange=e=>{try{localStorage.setItem('tgib_compress_q',e.target.value)}catch(err){}};
-$('#compressFormat').onchange=e=>{try{localStorage.setItem('tgib_compress_fmt',e.target.value)}catch(err){}};
-/* 检测浏览器是否支持 canvas 输出 WebP（旧版 Safari 不支持，toBlob 会返回 null） */
-function supportsWebpEncode(){try{const cv=document.createElement('canvas');cv.width=1;cv.height=1;return cv.toDataURL('image/webp').indexOf('data:image/webp')===0}catch(e){return false}}
-if(!supportsWebpEncode()){
-  const wopt=$('#compressFormat').querySelector('option[value="webp"]');
-  if(wopt){wopt.disabled=true;wopt.textContent='WebP（浏览器不支持）'}
-  if($('#compressFormat').value==='webp'){$('#compressFormat').value='auto';try{localStorage.setItem('tgib_compress_fmt','auto')}catch(e){}}
-}
 async function uploadFiles(fs){if(!fs.length)return;
 const bar=$('#uploadProgress'),fill=$('#uploadBarFill'),txt=$('#uploadBarText');
 bar.classList.remove('hidden');fill.style.width='0%';txt.textContent='上传中 0%';
@@ -464,7 +455,7 @@ if($('#compressToggle').checked)notice($('#uploadNotice'),'正在压缩图片…
 let totalOrig=0,totalNew=0,compressedCount=0,failedCount=0;
 const prepared=[];
 for(const f of fs.slice(0,20)){totalOrig+=f.size;const p=await compressImage(f);prepared.push(p);totalNew+=p.blob.size;if(p.saved>0)compressedCount++;if(p.failed)failedCount++;}
-if(failedCount)notice($('#uploadNotice'),`浏览器不支持所选压缩格式，${failedCount} 张按原格式上传`,true);
+if(failedCount)notice($('#uploadNotice'),`浏览器不支持 WebP 压缩，${failedCount} 张按原格式上传`,true);
 else if(compressedCount)notice($('#uploadNotice'),`已压缩 ${compressedCount} 张（${fmt(totalOrig)} → ${fmt(totalNew)}），开始上传…`,true);
 const fd=new FormData();prepared.forEach(p=>fd.append('files',p.blob,p.name));
 try{
