@@ -372,6 +372,13 @@ html.dark{--glass-bg:rgba(22,33,58,.55);--glass-border:rgba(255,255,255,.14);--g
     <div class="pw-actions"><button id="ubCancel">取消</button><button id="ubConfirm" class="danger">确认解绑</button></div>
   </div>
 </div>
+<div id="delModal" class="pw-modal hidden">
+  <div class="pw-card">
+    <h3>删除图片</h3>
+    <p>确定删除所选 <span id="delCount">1</span> 张图片？</p>
+    <div class="pw-actions"><button id="delCancel">取消</button><button id="delConfirm" class="danger">确认删除</button></div>
+  </div>
+</div>
 </div>
 <script>
 const $=s=>document.querySelector(s);const $$=s=>[...document.querySelectorAll(s)];
@@ -530,9 +537,17 @@ updateBatch()}
 function toggleSelect(id){if(selected.has(id))selected.delete(id);else selected.add(id);render()}
 function updateBatch(){const n=selected.size;$('#batchbar').classList.toggle('hidden',n===0);$('#batchCount').textContent=`已选择 ${n} 张`}
 async function copyText(text,msg){try{await navigator.clipboard.writeText(text)}catch(e){const ta=document.createElement('textarea');ta.value=text;document.body.appendChild(ta);ta.select();document.execCommand('copy');ta.remove()}toast(msg||'已复制')}
-async function deleteIds(ids){if(!ids.length)return;if(!confirm(`确定删除所选 ${ids.length} 张图片？`))return;
+/* 删除确认弹窗（页内液态玻璃，不用系统 confirm，就不会出现“禁止显示对话框”） */
+let delResolve=null;
+function openDelModal(n){$('#delCount').textContent=n;$('#delModal').classList.remove('hidden');return new Promise(res=>{delResolve=res})}
+function closeDelModal(v){$('#delModal').classList.add('hidden');if(delResolve){const r=delResolve;delResolve=null;r(v)}}
+$('#delConfirm').onclick=()=>closeDelModal(true);
+$('#delCancel').onclick=()=>closeDelModal(false);
+$('#delModal').addEventListener('click',e=>{if(e.target.id==='delModal')closeDelModal(false)});
+document.addEventListener('keydown',e=>{if(e.key==='Escape'&&delResolve)closeDelModal(false)});
+async function deleteIds(ids){if(!ids.length)return;if(!await openDelModal(ids.length))return;
 const set=new Set(ids);items=items.filter(x=>!set.has(x.id));selected.clear();render();
-try{const d=await call('/api/delete',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({ids})});toast(`已隐藏 ${d.hidden} 张，Telegram 删除成功 ${d.deleted} 张`);await loadStats();await load()}catch(e){alert(e.message);await load()}}
+try{const d=await call('/api/delete',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({ids})});toast(`已隐藏 ${d.hidden} 张，Telegram 删除成功 ${d.deleted} 张`);await loadStats();await load()}catch(e){toast(e.message);await load()}}
 /* 大图预览 */
 let lbIndex=-1;
 function openLightbox(id){const list=sortedItems();lbIndex=list.findIndex(x=>x.id===id);if(lbIndex<0)return;showLb()}
