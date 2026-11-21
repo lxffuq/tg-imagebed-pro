@@ -19,11 +19,18 @@ async function hashPassword(password, saltHex) {
   const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", salt, iterations: 100000, hash: "SHA-256" }, key, 256);
   return hex(salt) + ":" + hex(bits);
 }
-async function ensureAuthTables(env) {
+let tablesReady = false;
+async function ensureTables(env) {
+  if (tablesReady) return;
   await env.DB.batch([
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS images (id TEXT PRIMARY KEY, original_name TEXT NOT NULL, mime_type TEXT NOT NULL, size_bytes INTEGER NOT NULL, telegram_chat_id TEXT NOT NULL, telegram_message_id INTEGER NOT NULL, telegram_file_id TEXT NOT NULL, telegram_file_unique_id TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')), status TEXT NOT NULL DEFAULT 'active', delete_error TEXT)"),
+    env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_images_created ON images(created_at DESC)"),
+    env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_images_name ON images(original_name)"),
+    env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_images_status ON images(status)"),
     env.DB.prepare("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)"),
     env.DB.prepare("CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL)"),
   ]);
+  tablesReady = true;
 }
 async function getPasswordHash(env) {
   try { const row = await env.DB.prepare("SELECT value FROM settings WHERE key='admin_password_hash'").first(); return row?.value || null; }
@@ -82,11 +89,11 @@ async function api(request, env, ctx) {
 
   // 首次设置密码：部署成功后第一次打开站点时调用，之后不再开放
   if (url.pathname === "/api/auth/status") {
-    await ensureAuthTables(env);
+    await ensureTables(env);
     return json({ setupRequired: !env.ADMIN_TOKEN && !(await getPasswordHash(env)) });
   }
   if (url.pathname === "/api/auth/setup" && request.method === "POST") {
-    await ensureAuthTables(env);
+    await ensureTables(env);
     if (env.ADMIN_TOKEN || (await getPasswordHash(env))) return err("管理密码已设置", 409);
     const body = await request.json().catch(() => ({}));
     const password = String(body.password || "");
@@ -95,14 +102,14 @@ async function api(request, env, ctx) {
     return json({ token: await newSession(env) });
   }
   if (url.pathname === "/api/auth/login" && request.method === "POST") {
-    await ensureAuthTables(env);
+    await ensureTables(env);
     const body = await request.json().catch(() => ({}));
     if (!(await checkPassword(env, String(body.password || "")))) return err("密码不正确", 401);
     return json({ token: await newSession(env) });
   }
   if (url.pathname === "/api/auth/change" && request.method === "POST") {
     if (!(await auth(request, env))) return err("Unauthorized", 401);
-    await ensureAuthTables(env);
+    await ensureTables(env);
     const body = await request.json().catch(() => ({}));
     if (!(await checkPassword(env, String(body.oldPassword || "")))) return err("当前密码不正确", 401);
     const np = String(body.newPassword || "");
@@ -127,7 +134,7 @@ async function api(request, env, ctx) {
   }
   if (url.pathname === "/api/settings/telegram" && request.method === "POST") {
     if (!(await auth(request, env))) return err("Unauthorized", 401);
-    await ensureAuthTables(env);
+    await ensureTables(env);
     const body = await request.json().catch(() => ({}));
     const botToken = String(body.botToken || "").trim();
     const chatId = String(body.chatId || "").trim();
@@ -297,9 +304,10 @@ async function retryDeletes(env) {
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+    try { await ensureTables(env); } catch {}
     if (url.pathname.startsWith("/api/")) return api(request, env, ctx);
     if (url.pathname.startsWith("/i/")) return serveImage(request, env, ctx);
     return env.ASSETS.fetch(request);
   },
-  async scheduled(event, env, ctx) { ctx.waitUntil(retryDeletes(env)); }
+  async scheduled(event, env, ctx) { await ensureTables(env); ctx.waitUntil(retryDeletes(env)); }
 };
