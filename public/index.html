@@ -166,6 +166,11 @@ html.dark{--glass-bg:rgba(22,33,58,.55);--glass-border:rgba(255,255,255,.14);--g
 .dropzone.drag{background:rgba(37,99,235,.16)}
 .bottomnav,.batchbar{background:var(--glass-bg);-webkit-backdrop-filter:blur(20px) saturate(170%);backdrop-filter:blur(20px) saturate(170%);border-top-color:var(--glass-border)}
 .toast,.lb-x,.lb-arrow{-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px)}
+/* 图片压缩 */
+.compress-row{display:flex;align-items:center;justify-content:center;gap:8px;margin-top:18px;font-size:13px;color:var(--muted);flex-wrap:wrap}
+.compress-row label{display:flex;align-items:center;gap:6px;cursor:pointer}
+.compress-row input[type=checkbox]{width:16px;height:16px;margin:0;accent-color:var(--accent)}
+.compress-row select{border:1px solid var(--border);background:var(--glass-bg);border-radius:999px;padding:6px 10px;font-size:13px;font-weight:600;color:var(--text);outline:none}
 /* 更换管理密码弹窗 */
 .pw-modal{position:fixed;inset:0;z-index:70;display:flex;align-items:center;justify-content:center;padding:20px;background:rgba(4,7,16,.55);-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px)}
 .pw-card{width:100%;max-width:380px;background:var(--glass-bg);-webkit-backdrop-filter:blur(20px) saturate(160%);backdrop-filter:blur(20px) saturate(160%);border:1px solid var(--glass-border);border-radius:20px;padding:22px 20px;box-shadow:inset 0 1px 0 var(--glass-hi),0 16px 40px rgba(0,0,0,.25);animation:pwIn .18s ease}
@@ -229,6 +234,7 @@ html.dark{--glass-bg:rgba(22,33,58,.55);--glass-border:rgba(255,255,255,.14);--g
       <p>支持 JPG、PNG、WebP 等格式，单张最大 20MB，每次最多 20 张</p>
       <input id="files" type="file" accept="image/*" multiple class="hidden">
       <button id="choose" class="primary"><svg viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>选择文件</button>
+      <div class="compress-row"><label><input id="compressToggle" type="checkbox" checked> 上传前压缩</label><select id="compressQuality"><option value="high">高清</option><option value="mid" selected>均衡</option><option value="low">省流</option></select></div>
       <div id="uploadNotice" class="notice"></div>
       <div id="uploadProgress" class="hidden">
         <div class="up-bar"><div id="uploadBarFill"></div></div>
@@ -418,11 +424,38 @@ const dz=$('#dropzone');
 ['dragenter','dragover'].forEach(ev=>dz.addEventListener(ev,e=>{e.preventDefault();dz.classList.add('drag')}));
 ['dragleave','drop'].forEach(ev=>dz.addEventListener(ev,e=>{e.preventDefault();dz.classList.remove('drag')}));
 dz.addEventListener('drop',e=>{const fs=[...e.dataTransfer.files].filter(f=>f.type.startsWith('image/'));if(fs.length)uploadFiles(fs)});
+/* 上传前压缩：JPG/PNG/WebP 用 canvas 重编码（PNG 转 WebP 保透明），GIF/SVG 等原样上传；压完没变小就用原图 */
+async function compressImage(file){
+  const plain={blob:file,name:file.name,saved:0};
+  if(!$('#compressToggle').checked)return plain;
+  const m=/^image\/(jpeg|png|webp)$/i.exec(file.type||'');if(!m)return plain;
+  const preset={high:{quality:.9,max:2560},mid:{quality:.8,max:1920},low:{quality:.65,max:1280}}[$('#compressQuality').value]||{quality:.8,max:1920};
+  let bmp;try{bmp=await createImageBitmap(file)}catch(e){return plain}
+  const scale=Math.min(1,preset.max/Math.max(bmp.width,bmp.height));
+  const w=Math.max(1,Math.round(bmp.width*scale)),h=Math.max(1,Math.round(bmp.height*scale));
+  const cv=document.createElement('canvas');cv.width=w;cv.height=h;
+  const ctx=cv.getContext('2d');
+  const outType=m[1].toLowerCase()==='jpeg'?'image/jpeg':'image/webp';
+  if(outType==='image/jpeg'){ctx.fillStyle='#fff';ctx.fillRect(0,0,w,h)}
+  ctx.drawImage(bmp,0,0,w,h);bmp.close();
+  const blob=await new Promise(res=>{try{cv.toBlob(res,outType,preset.quality)}catch(e){res(null)}});
+  if(!blob||blob.size>=file.size)return plain;
+  const ext=outType==='image/jpeg'?'.jpg':'.webp';
+  return {blob,name:file.name.replace(/\.[^.]+$/,'')+ext,saved:file.size-blob.size};
+}
+try{const c=localStorage.getItem('tgib_compress');if(c!==null)$('#compressToggle').checked=c==='1';const q=localStorage.getItem('tgib_compress_q');if(q)$('#compressQuality').value=q}catch(e){}
+$('#compressToggle').onchange=e=>{try{localStorage.setItem('tgib_compress',e.target.checked?'1':'0')}catch(err){}};
+$('#compressQuality').onchange=e=>{try{localStorage.setItem('tgib_compress_q',e.target.value)}catch(err){}};
 async function uploadFiles(fs){if(!fs.length)return;
 const bar=$('#uploadProgress'),fill=$('#uploadBarFill'),txt=$('#uploadBarText');
 bar.classList.remove('hidden');fill.style.width='0%';txt.textContent='上传中 0%';
 clearTimeout($('#uploadNotice')._h);notice($('#uploadNotice'),`开始上传 ${fs.length} 张图片…`,true);
-const fd=new FormData();fs.slice(0,20).forEach(f=>fd.append('files',f));
+if($('#compressToggle').checked)notice($('#uploadNotice'),'正在压缩图片…',true);
+let totalOrig=0,totalNew=0,compressedCount=0;
+const prepared=[];
+for(const f of fs.slice(0,20)){totalOrig+=f.size;const p=await compressImage(f);prepared.push(p);totalNew+=p.blob.size;if(p.saved>0)compressedCount++;}
+if(compressedCount)notice($('#uploadNotice'),`已压缩 ${compressedCount} 张（${fmt(totalOrig)} → ${fmt(totalNew)}），开始上传…`,true);
+const fd=new FormData();prepared.forEach(p=>fd.append('files',p.blob,p.name));
 try{
 const d=await new Promise((resolve,reject)=>{
 const x=new XMLHttpRequest();
@@ -434,7 +467,8 @@ x.onerror=()=>reject(new Error('网络错误'));
 x.send(fd)});
 fill.style.width='100%';txt.textContent='上传中 100%';
 const ok=d.results.filter(x=>x.ok).length;const fails=d.results.filter(x=>!x.ok);
-notice($('#uploadNotice'),`完成：成功 ${ok} 张，失败 ${fails.length} 张${fails.length?`；${fails.map(x=>x.name+': '+x.error).join(' | ')}`:''}`,fails.length===0);
+const savedInfo=compressedCount?`，已压缩 ${fmt(totalOrig)} → ${fmt(totalNew)}`:'';
+notice($('#uploadNotice'),`完成：成功 ${ok} 张，失败 ${fails.length} 张${savedInfo}${fails.length?`；${fails.map(x=>x.name+': '+x.error).join(' | ')}`:''}`,fails.length===0);
 clearTimeout($('#uploadNotice')._h);if(fails.length===0)$('#uploadNotice')._h=setTimeout(()=>$('#uploadNotice').classList.remove('show'),3000);
 if(ok)renderUploadResults(d.results.filter(x=>x.ok));
 page=1;await loadStats();await load()}catch(e){notice($('#uploadNotice'),e.message)}
