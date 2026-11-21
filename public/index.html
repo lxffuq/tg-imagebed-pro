@@ -359,6 +359,13 @@ html.dark{--glass-bg:rgba(22,33,58,.55);--glass-border:rgba(255,255,255,.14);--g
     <div class="pw-actions"><button id="pwCancel">取消</button><button id="pwSubmit" class="primary">确认更换</button></div>
   </div>
 </div>
+<div id="ubModal" class="pw-modal hidden">
+  <div class="pw-card">
+    <h3>解绑 Telegram 机器人</h3>
+    <p>解绑后无法上传新图片，已上传的图片不受影响。</p>
+    <div class="pw-actions"><button id="ubCancel">取消</button><button id="ubConfirm" class="danger">确认解绑</button></div>
+  </div>
+</div>
 </div>
 <script>
 const $=s=>document.querySelector(s);const $$=s=>[...document.querySelectorAll(s)];
@@ -544,9 +551,14 @@ notice($('#tgNotice'),'正在校验机器人…',true);
 try{const d=await call('/api/settings/telegram',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({botToken,chatId})});
 notice($('#tgNotice'),`已绑定 ${d.botUsername||''} · ${d.chatId||''}`,true);await loadTgSettings()}
 catch(e){notice($('#tgNotice'),e.message)}};
-$('#tgUnbind').onclick=async()=>{if(!confirm('确定解绑 Telegram 机器人吗？解绑后无法上传新图片，已上传的图片不受影响。'))return;
-try{await call('/api/settings/telegram',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({botToken:'',chatId:''})});
-notice($('#tgNotice'),'已解绑',true);await loadTgSettings()}catch(e){notice($('#tgNotice'),e.message)}};
+function openUbModal(){$('#ubModal').classList.remove('hidden')}
+function closeUbModal(){$('#ubModal').classList.add('hidden')}
+$('#tgUnbind').onclick=openUbModal;
+$('#ubCancel').onclick=closeUbModal;
+$('#ubModal').addEventListener('click',e=>{if(e.target.id==='ubModal')closeUbModal()});
+document.addEventListener('keydown',e=>{if(e.key==='Escape'&&!$('#ubModal').classList.contains('hidden'))closeUbModal()});
+$('#ubConfirm').onclick=async()=>{const btn=$('#ubConfirm');btn.disabled=true;btn.textContent='解绑中…';
+try{await call('/api/settings/telegram',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({botToken:'',chatId:''})});closeUbModal();notice($('#tgNotice'),'已解绑',true);await loadTgSettings()}catch(e){closeUbModal();notice($('#tgNotice'),e.message)}finally{btn.disabled=false;btn.textContent='确认解绑'}};
 /* 底部导航 */
 $$('.nav-it').forEach(b=>b.onclick=()=>{$$('.nav-it').forEach(x=>x.classList.remove('active'));b.classList.add('active');
 const v=b.dataset.view;['home','manage','stats','settings'].forEach(k=>$('#view-'+k).classList.toggle('hidden',k!==v));
