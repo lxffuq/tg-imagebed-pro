@@ -553,7 +553,7 @@ $('#delModal').addEventListener('click',e=>{if(e.target.id==='delModal')closeDel
 document.addEventListener('keydown',e=>{if(e.key==='Escape'&&delResolve)closeDelModal(false)});
 async function deleteIds(ids){if(!ids.length)return;if(!await openDelModal(ids.length))return;
 const set=new Set(ids);items=items.filter(x=>!set.has(x.id));selected.clear();render();
-try{const d=await call('/api/delete',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({ids})});toast(`已隐藏 ${d.hidden} 张，Telegram 删除成功 ${d.deleted} 张`);await loadStats();await load()}catch(e){toast(e.message);await load()}}
+try{const d=await call('/api/delete',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({ids})});toast(d.queued?`删除成功 ${d.deleted} 张，${d.queued} 张稍后自动重试`:'删除成功');await loadStats();await load()}catch(e){toast(e.message);await load()}}
 /* 大图预览 */
 let lbIndex=-1;
 function openLightbox(id){const list=sortedItems();lbIndex=list.findIndex(x=>x.id===id);if(lbIndex<0)return;showLb()}
