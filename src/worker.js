@@ -12,6 +12,10 @@ function safeEqual(a, b) {
   let d = 0; for (let i = 0; i < a.length; i++) d |= a.charCodeAt(i) ^ b.charCodeAt(i);
   return d === 0;
 }
+// D1 batch 单次最多 100 条，分块写更稳妥
+async function batchChunked(env, stmts, size = 50) {
+  for (let i = 0; i < stmts.length; i += size) await env.DB.batch(stmts.slice(i, i + size));
+}
 // 管理密码：PBKDF2-SHA256 10 万次迭代，盐 16 字节，存 D1 settings 表
 async function hashPassword(password, saltHex) {
   const salt = saltHex ? unhex(saltHex) : crypto.getRandomValues(new Uint8Array(16));
@@ -23,13 +27,16 @@ let tablesReady = false;
 async function ensureTables(env) {
   if (tablesReady) return;
   await env.DB.batch([
-    env.DB.prepare("CREATE TABLE IF NOT EXISTS images (id TEXT PRIMARY KEY, original_name TEXT NOT NULL, mime_type TEXT NOT NULL, size_bytes INTEGER NOT NULL, telegram_chat_id TEXT NOT NULL, telegram_message_id INTEGER NOT NULL, telegram_file_id TEXT NOT NULL, telegram_file_unique_id TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')), status TEXT NOT NULL DEFAULT 'active', delete_error TEXT)"),
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS images (id TEXT PRIMARY KEY, original_name TEXT NOT NULL, mime_type TEXT NOT NULL, size_bytes INTEGER NOT NULL, telegram_chat_id TEXT NOT NULL, telegram_message_id INTEGER NOT NULL, telegram_file_id TEXT NOT NULL, telegram_file_unique_id TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')), status TEXT NOT NULL DEFAULT 'active', delete_error TEXT, delete_attempts INTEGER NOT NULL DEFAULT 0)"),
     env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_images_created ON images(created_at DESC)"),
     env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_images_name ON images(original_name)"),
     env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_images_status ON images(status)"),
     env.DB.prepare("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)"),
     env.DB.prepare("CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL)"),
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS login_attempts (ip TEXT PRIMARY KEY, fails INTEGER NOT NULL DEFAULT 0, last_at INTEGER NOT NULL)"),
   ]);
+  // 旧库补列：新库建表时已包含 delete_attempts，老库第一次跑到这里会加上（已存在会报错，已吞掉）
+  try { await env.DB.prepare("ALTER TABLE images ADD COLUMN delete_attempts INTEGER NOT NULL DEFAULT 0").run(); } catch {}
   tablesReady = true;
 }
 async function getPasswordHash(env) {
@@ -104,7 +111,17 @@ async function api(request, env, ctx) {
   if (url.pathname === "/api/auth/login" && request.method === "POST") {
     await ensureTables(env);
     const body = await request.json().catch(() => ({}));
-    if (!(await checkPassword(env, String(body.password || "")))) return err("密码不正确", 401);
+    // 限流：同一 IP 5 分钟内错 5 次，锁 15 分钟（防暴力猜密码和 CPU 打满）
+    const ip = request.headers.get("cf-connecting-ip") || "unknown";
+    const nowSec = Math.floor(Date.now() / 1000);
+    let att = null;
+    try { att = await env.DB.prepare("SELECT fails, last_at FROM login_attempts WHERE ip=?").bind(ip).first(); } catch {}
+    if (att && att.fails >= 5 && nowSec - att.last_at < 900) return err("登录尝试过多，请 15 分钟后再试", 429);
+    if (!(await checkPassword(env, String(body.password || "")))) {
+      try { await env.DB.prepare("INSERT INTO login_attempts (ip, fails, last_at) VALUES (?, 1, ?) ON CONFLICT(ip) DO UPDATE SET fails = CASE WHEN login_attempts.last_at < ? THEN 1 ELSE login_attempts.fails + 1 END, last_at = excluded.last_at").bind(ip, nowSec, nowSec - 900).run(); } catch {}
+      return err("密码不正确", 401);
+    }
+    try { await env.DB.prepare("DELETE FROM login_attempts WHERE ip=?").bind(ip).run(); } catch {}
     return json({ token: await newSession(env) });
   }
   if (url.pathname === "/api/auth/change" && request.method === "POST") {
@@ -115,8 +132,10 @@ async function api(request, env, ctx) {
     const np = String(body.newPassword || "");
     if (np.length < 6) return err("新密码至少 6 位", 400);
     await env.DB.prepare("INSERT INTO settings (key, value) VALUES ('admin_password_hash', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(await hashPassword(np)).run();
-    await env.DB.prepare("DELETE FROM sessions").run();
-    return json({ token: await newSession(env) });
+    // 先建新会话、再清旧会话：建会话万一失败，当前设备也不会没 token
+    const tok = await newSession(env);
+    try { await env.DB.prepare("DELETE FROM sessions WHERE token_hash != ?").bind(await sha256hex(tok)).run(); } catch {}
+    return json({ token: tok });
   }
   if (url.pathname === "/api/auth/logout" && request.method === "POST") {
     const bearer = (request.headers.get("authorization") || "").replace(/^Bearer\s+/i, "");
@@ -139,6 +158,8 @@ async function api(request, env, ctx) {
     const botToken = String(body.botToken || "").trim();
     const chatId = String(body.chatId || "").trim();
     if (!botToken && !chatId) {
+      // 配置来自部署变量时，页面解绑不生效（前端已禁用按钮，接口也挡一下）
+      if (env.TG_BOT_TOKEN || env.TG_CHAT_ID) return err("当前由部署变量提供，页面修改不生效", 400);
       await env.DB.batch([
         env.DB.prepare("DELETE FROM settings WHERE key='tg_bot_token'"),
         env.DB.prepare("DELETE FROM settings WHERE key='tg_chat_id'"),
@@ -151,7 +172,7 @@ async function api(request, env, ctx) {
     if (!tokenToUse) { const cfg = await getTelegramConfig(env); tokenToUse = cfg.botToken || ""; }
     if (!tokenToUse) return err("请填写机器人 Token", 400);
     if (!/^\d+:[A-Za-z0-9_-]{35}$/.test(tokenToUse)) return err("机器人 Token 格式不对（应为 数字:35位字符）", 400);
-    if (!/^-?\d+$/.test(chatId)) return err("频道 ID 格式不对（应为 -100 开头的数字）", 400);
+    if (!/^-100\d+$/.test(chatId)) return err("频道 ID 格式不对（应为 -100 开头的数字）", 400);
     let me;
     try { me = await (await fetch(`https://api.telegram.org/bot${tokenToUse}/getMe`)).json(); }
     catch { return err("连接 Telegram 失败，请稍后重试", 502); }
@@ -177,8 +198,9 @@ async function api(request, env, ctx) {
     const total = await env.DB.prepare("SELECT COUNT(*) AS c FROM images WHERE status='active'").first();
     const bytes = await env.DB.prepare("SELECT COALESCE(SUM(size_bytes),0) AS s FROM images WHERE status='active'").first();
     const today = await env.DB.prepare("SELECT COUNT(*) AS c FROM images WHERE status='active' AND date(created_at,'+8 hours') = date('now','+8 hours')").first();
+    const deleting = await env.DB.prepare("SELECT COUNT(*) AS c FROM images WHERE status='deleting'").first();
     const n = total?.c || 0;
-    return json({ total: n, totalBytes: bytes?.s || 0, today: today?.c || 0, success: n });
+    return json({ total: n, totalBytes: bytes?.s || 0, today: today?.c || 0, success: n, deleting: deleting?.c || 0 });
   }
 
   if (url.pathname === "/api/images" && request.method === "GET") {
@@ -189,12 +211,15 @@ async function api(request, env, ctx) {
     const where = filter === "today"
       ? "status = 'active' AND date(created_at,'+8 hours') = date('now','+8 hours')"
       : "status = 'active'";
+    // 服务端排序（白名单拼 ORDER BY，全库排，不再只排当前页）；LIKE 里的 % _ \ 先转义
+    const orderBy = { new: "created_at DESC", old: "created_at ASC", big: "size_bytes DESC", small: "size_bytes ASC" }[url.searchParams.get("sort") || "new"] || "created_at DESC";
+    const likeQ = "%" + q.replace(/[%_\\]/g, (m) => "\\" + m) + "%";
     const count = q
-      ? await env.DB.prepare(`SELECT COUNT(*) AS total FROM images WHERE ${where} AND original_name LIKE ?`).bind(`%${q}%`).first()
+      ? await env.DB.prepare(`SELECT COUNT(*) AS total FROM images WHERE ${where} AND original_name LIKE ? ESCAPE '\\'`).bind(likeQ).first()
       : await env.DB.prepare(`SELECT COUNT(*) AS total FROM images WHERE ${where}`).first();
     const stmt = q
-      ? env.DB.prepare(`SELECT id, original_name, mime_type, size_bytes, created_at FROM images WHERE ${where} AND original_name LIKE ? ORDER BY created_at DESC LIMIT ? OFFSET ?`).bind(`%${q}%`, limit, (page - 1) * limit)
-      : env.DB.prepare(`SELECT id, original_name, mime_type, size_bytes, created_at FROM images WHERE ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`).bind(limit, (page - 1) * limit);
+      ? env.DB.prepare(`SELECT id, original_name, mime_type, size_bytes, created_at FROM images WHERE ${where} AND original_name LIKE ? ESCAPE '\\' ORDER BY ${orderBy} LIMIT ? OFFSET ?`).bind(likeQ, limit, (page - 1) * limit)
+      : env.DB.prepare(`SELECT id, original_name, mime_type, size_bytes, created_at FROM images WHERE ${where} ORDER BY ${orderBy} LIMIT ? OFFSET ?`).bind(limit, (page - 1) * limit);
     const { results = [] } = await stmt.all();
     return json({ items: results, total: count?.total || 0, page, limit, pages: Math.max(1, Math.ceil((count?.total || 0) / limit)) });
   }
@@ -206,10 +231,10 @@ async function api(request, env, ctx) {
     const files = form.getAll("files").filter(x => x instanceof File);
     if (!files.length) return err("请先选择图片");
     if (files.length > 20) return err("单次最多上传20张图片");
-    const out = [];
-    for (const file of files) {
-      if (!isImage(file.type)) { out.push({ name: file.name, ok: false, error: "仅支持图片格式" }); continue; }
-      if (file.size > 20 * 1024 * 1024) { out.push({ name: file.name, ok: false, error: "单张图片最大20MB" }); continue; }
+    // 单张上传：并行发 Telegram（并发 4），不再一张一张等
+    async function uploadOne(file) {
+      if (!isImage(file.type)) return { name: file.name, ok: false, error: "仅支持图片格式" };
+      if (file.size > 20 * 1024 * 1024) return { name: file.name, ok: false, error: "单张图片最大20MB" };
       try {
         const fd = new FormData();
         fd.set("chat_id", cfg.chatId);
@@ -221,9 +246,14 @@ async function api(request, env, ctx) {
         const id = crypto.randomUUID();
         await env.DB.prepare(`INSERT INTO images (id, original_name, mime_type, size_bytes, telegram_chat_id, telegram_message_id, telegram_file_id, telegram_file_unique_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
           .bind(id, cleanName(file.name), file.type || "application/octet-stream", file.size, cfg.chatId, tg.result.message_id, doc.file_id, doc.file_unique_id || null).run();
-        out.push({ name: file.name, ok: true, id, url: `${url.origin}/i/${id}` });
-      } catch (e) { out.push({ name: file.name, ok: false, error: e.message || "上传失败" }); }
+        return { name: file.name, ok: true, id, url: `${url.origin}/i/${id}` };
+      } catch (e) { return { name: file.name, ok: false, error: e.message || "上传失败" }; }
     }
+    const out = new Array(files.length);
+    let next = 0;
+    await Promise.all(Array.from({ length: Math.min(4, files.length) }, async () => {
+      while (next < files.length) { const i = next++; out[i] = await uploadOne(files[i]); }
+    }));
     return json({ results: out });
   }
 
@@ -236,7 +266,7 @@ async function api(request, env, ctx) {
     const placeholders = ids.map(() => "?").join(",");
     const { results: rows = [] } = await env.DB.prepare(`SELECT * FROM images WHERE id IN (${placeholders}) AND status='active'`).bind(...ids).all();
     if (rows.length) {
-      await env.DB.batch(rows.map(r => env.DB.prepare("UPDATE images SET status='deleting' WHERE id=?").bind(r.id)));
+      await batchChunked(env, rows.map(r => env.DB.prepare("UPDATE images SET status='deleting' WHERE id=?").bind(r.id)));
       // 清缓存：serveImage 用的是 ?v=2 的键，旧键也一起清
       ctx.waitUntil(Promise.all(rows.flatMap(r => [
         caches.default.delete(new Request(`${url.origin}/i/${r.id}?v=2`)),
@@ -244,8 +274,8 @@ async function api(request, env, ctx) {
       ])));
     }
     if (!cfg.botToken) {
-      if (rows.length) await env.DB.batch(rows.map(r => env.DB.prepare("UPDATE images SET delete_error=? WHERE id=?").bind("未绑定 Telegram 机器人，请先在设置里绑定", r.id)));
-      return json({ deleted: 0, queued: rows.length, hidden: ids.length });
+      if (rows.length) await batchChunked(env, rows.map(r => env.DB.prepare("UPDATE images SET delete_error=? WHERE id=?").bind("未绑定 Telegram 机器人，请先在设置里绑定", r.id)));
+      return json({ deleted: 0, queued: rows.length, hidden: rows.length });
     }
     // Telegram 删除并行发，不再一张一张等
     const settled = await Promise.allSettled(rows.map(async (row) => {
@@ -260,8 +290,8 @@ async function api(request, env, ctx) {
       ...okIds.map(id => env.DB.prepare("DELETE FROM images WHERE id=?").bind(id)),
       ...failList.map(f => env.DB.prepare("UPDATE images SET delete_error=? WHERE id=?").bind(f.error, f.id)),
     ];
-    if (stmts.length) await env.DB.batch(stmts);
-    return json({ deleted: okIds.length, queued: failList.length, hidden: ids.length });
+    if (stmts.length) await batchChunked(env, stmts);
+    return json({ deleted: okIds.length, queued: failList.length, hidden: rows.length });
   }
   return err("Not found", 404);
 }
@@ -293,6 +323,8 @@ async function serveImage(request, env, ctx) {
   headers.set("cache-control", "public, max-age=86400, s-maxage=604800");
   headers.set("access-control-allow-origin", "*");
   headers.set("x-content-type-options", "nosniff");
+  // SVG 里内嵌的脚本跑不起来：沙箱后直接打开直链也不会执行（<img> 引用不受影响）
+  headers.set("content-security-policy", "sandbox");
   const response = new Response(upstream.body, { status: 200, headers });
   ctx.waitUntil(cache.put(cacheKey, response.clone()));
   return response;
@@ -301,14 +333,15 @@ async function serveImage(request, env, ctx) {
 async function retryDeletes(env) {
   const cfg = await getTelegramConfig(env);
   if (!cfg.botToken) return;
-  const { results = [] } = await env.DB.prepare("SELECT id, telegram_chat_id, telegram_message_id FROM images WHERE status='deleting' LIMIT 50").all();
+  // 每 15 分钟一轮，最多重试 96 轮（约 24 小时）就停手，不再无限重试
+  const { results = [] } = await env.DB.prepare("SELECT id, telegram_chat_id, telegram_message_id FROM images WHERE status='deleting' AND delete_attempts < 96 LIMIT 50").all();
   for (const row of results) {
     try {
       const r = await fetch(telegram(cfg.botToken, "deleteMessage"), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ chat_id: row.telegram_chat_id, message_id: row.telegram_message_id }) });
       const j = await r.json();
       if (j.ok || /message to delete not found/i.test(j.description || "")) await env.DB.prepare("DELETE FROM images WHERE id=?").bind(row.id).run();
-      else await env.DB.prepare("UPDATE images SET delete_error=? WHERE id=?").bind(j.description || "Telegram删除失败", row.id).run();
-    } catch (e) { await env.DB.prepare("UPDATE images SET delete_error=? WHERE id=?").bind(String(e.message).slice(0, 500), row.id).run(); }
+      else await env.DB.prepare("UPDATE images SET delete_error=?, delete_attempts=delete_attempts+1 WHERE id=?").bind(j.description || "Telegram删除失败", row.id).run();
+    } catch (e) { await env.DB.prepare("UPDATE images SET delete_error=?, delete_attempts=delete_attempts+1 WHERE id=?").bind(String(e.message).slice(0, 500), row.id).run(); }
   }
 }
 
@@ -320,5 +353,12 @@ export default {
     if (url.pathname.startsWith("/i/")) return serveImage(request, env, ctx);
     return env.ASSETS.fetch(request);
   },
-  async scheduled(event, env, ctx) { await ensureTables(env); ctx.waitUntil(retryDeletes(env)); }
+  async scheduled(event, env, ctx) {
+    await ensureTables(env);
+    // 顺带清过期会话和过期的登录失败记录
+    const nowSec = Math.floor(Date.now() / 1000);
+    try { await env.DB.prepare("DELETE FROM sessions WHERE expires_at < ?").bind(nowSec).run(); } catch {}
+    try { await env.DB.prepare("DELETE FROM login_attempts WHERE last_at < ?").bind(nowSec - 3600).run(); } catch {}
+    ctx.waitUntil(retryDeletes(env));
+  }
 };

@@ -262,7 +262,7 @@ html.dark{--glass-bg:rgba(22,33,58,.55);--glass-border:rgba(255,255,255,.14);--g
   <!-- 管理：图库 -->
   <section id="view-manage" class="hidden">
     <div class="search-row">
-      <div class="search-box"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg><input id="search" type="text" placeholder="搜索图片、标签或文件名…" autocomplete="off"></div>
+      <div class="search-box"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg><input id="search" type="text" placeholder="搜索文件名…" autocomplete="off"></div>
       <div class="filter-btn"><svg width="15" height="15" viewBox="0 0 24 24" style="stroke:var(--text);fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round"><path d="M22 3H2l8 9.46V19l4 2v-8.54z"/></svg><select id="sortSel" title="筛选排序"><option value="new">最新在前</option><option value="old">最早在前</option><option value="big">文件最大</option><option value="small">文件最小</option></select></div>
     </div>
 
@@ -290,6 +290,7 @@ html.dark{--glass-bg:rgba(22,33,58,.55);--glass-border:rgba(255,255,255,.14);--g
       <div class="kv"><span>单张上限</span><span>20 MB</span></div>
       <div class="kv"><span>单次上传</span><span>最多 20 张</span></div>
       <div class="kv"><span>删除重试</span><span>每 15 分钟自动重试</span></div>
+      <div class="kv"><span>删除卡住</span><span id="stDeleting">0</span></div>
       <div class="kv"><span>图片直链</span><span id="originLabel"></span></div>
     </div>
   </section>
@@ -421,7 +422,7 @@ if(np!==np2)return pwErr('两次输入的新密码不一致');
 const btn=$('#pwSubmit');btn.disabled=true;btn.textContent='更换中…';
 try{const r=await fetch('/api/auth/change',{method:'POST',headers:{...headers(),'content-type':'application/json'},body:JSON.stringify({oldPassword:oldPw,newPassword:np})});const j=await r.json().catch(()=>({}));
 if(!r.ok){if(j.error==='Unauthorized'){closePwModal();logout();return}throw Error(j.error||'更换失败')}
-token=r.token;localStorage.setItem('tgib_token',token);closePwModal();toast('管理密码已更换')}
+token=j.token;localStorage.setItem('tgib_token',token);closePwModal();toast('管理密码已更换')}
 catch(e){pwErr(e.message)}
 finally{btn.disabled=false;btn.textContent='确认更换'}};
 /* 上传 */
@@ -436,6 +437,8 @@ async function compressImage(file){
   const plain={blob:file,name:file.name,saved:0,failed:false};
   if(!$('#compressToggle').checked)return plain;
   const m=/^image\/(jpeg|png|webp|heic|heif)$/i.exec(file.type||'');if(!m)return plain;
+  // 动态 WebP 跳过压缩：canvas 只取第一帧，会把动图压成静态图（GIF 已在上面排除）
+  if(m[1].toLowerCase()==='webp'){try{const head=new Uint8Array(await file.slice(0,100).arrayBuffer());if(String.fromCharCode(...head).includes('ANIM'))return plain}catch(e){}}
   const preset={high:{quality:.9,max:2560},mid:{quality:.8,max:1920},low:{quality:.65,max:1280}}[$('#compressQuality').value]||{quality:.8,max:1920};
   let bmp;try{bmp=await createImageBitmap(file)}catch(e){return plain}
   const scale=Math.min(1,preset.max/Math.max(bmp.width,bmp.height));
@@ -471,7 +474,7 @@ const x=new XMLHttpRequest();
 x.open('POST','/api/upload');
 x.setRequestHeader('Authorization',headers().Authorization);
 x.upload.onprogress=e=>{if(e.lengthComputable){const p=Math.round(e.loaded/e.total*100);fill.style.width=p+'%';txt.textContent='上传中 '+p+'%'}};
-x.onload=()=>{let j=null;try{j=JSON.parse(x.responseText)}catch(e){}if(x.status>=200&&x.status<300&&j)resolve(j);else reject(new Error((j&&j.error)||('HTTP '+x.status)))};
+x.onload=()=>{if(x.status===401){logout();reject(new Error('登录凭证失效'));return}let j=null;try{j=JSON.parse(x.responseText)}catch(e){}if(x.status>=200&&x.status<300&&j)resolve(j);else reject(new Error((j&&j.error)||('HTTP '+x.status)))};
 x.onerror=()=>reject(new Error('网络错误'));
 x.send(fd)});
 fill.style.width='100%';txt.textContent='上传中 100%';
@@ -516,12 +519,15 @@ $('#stSpace2').textContent='约 '+fmt(b);
 $('#stSuccess2').textContent=t.toLocaleString();
 $('#stToday2').textContent=td.toLocaleString();
 const d=td>0?'↑ +'+td:'今日暂无新增';['#stTotalDelta2','#stSuccessDelta2','#stTodayDelta2'].forEach(s=>$(s).textContent=d);
-$('#tabAllCount').textContent=t.toLocaleString();$('#homeCount').textContent=t.toLocaleString()}catch(e){/* 统计失败不阻塞列表 */}}
+$('#tabAllCount').textContent=t.toLocaleString();$('#homeCount').textContent=t.toLocaleString();$('#stDeleting').textContent=(stats.deleting||0)+' 张'}catch(e){/* 统计失败不阻塞列表 */}}
 /* 列表 */
-function listPath(){const q=$('#search').value.trim();let p=`/api/images?page=${page}&limit=${limit}&q=${encodeURIComponent(q)}`;if(tab==='today')p+='&filter=today';return p}
+function listPath(){const q=$('#search').value.trim();let p=`/api/images?page=${page}&limit=${limit}&q=${encodeURIComponent(q)}&sort=${sortMode}`;if(tab==='today')p+='&filter=today';return p}
 async function load(){try{
 if(tab==='fav'){items=Object.values(favs);total=items.length;pages=1;render();return}
-const d=await call(listPath());items=d.items;total=d.total;pages=d.pages;render()}catch(e){$('#grid').innerHTML=`<div class="empty">${esc(e.message)}</div>`}}
+let d=await call(listPath());
+// 删掉当页最后一张后 page 可能越界，自动退到最后一页再拉一次，不留空白页
+if(page>d.pages){page=Math.max(1,d.pages);d=await call(listPath())}
+items=d.items;total=d.total;pages=d.pages;render()}catch(e){$('#grid').innerHTML=`<div class="empty">${esc(e.message)}</div>`}}
 function sortedItems(){const a=[...items];if(sortMode==='old')a.sort((x,y)=>x.created_at<y.created_at?-1:1);else if(sortMode==='big')a.sort((x,y)=>y.size_bytes-x.size_bytes);else if(sortMode==='small')a.sort((x,y)=>x.size_bytes-y.size_bytes);else a.sort((x,y)=>x.created_at<y.created_at?-1:1);return a}
 function render(){const g=$('#grid');g.innerHTML='';const list=sortedItems();
 if(!list.length){g.innerHTML='<div class="empty">暂无图片，拖一张上来试试</div>'}
@@ -554,10 +560,12 @@ function openLightbox(id){const list=sortedItems();lbIndex=list.findIndex(x=>x.i
 function showLb(){const list=sortedItems();const x=list[lbIndex];if(!x){closeLb();return}
 $('#lbImg').src='/i/'+encodeURIComponent(x.id);
 $('#lbName').textContent=x.original_name;
-$('#lbMeta').textContent=fmt(x.size_bytes)+' · '+new Date(x.created_at+'Z').toLocaleString();
+$('#lbMeta').textContent=fmt(x.size_bytes)+' · '+new Date(x.created_at.replace(' ','T')+'Z').toLocaleString();
 $('#lightbox').classList.remove('hidden');document.body.style.overflow='hidden'}
 function closeLb(){$('#lightbox').classList.add('hidden');document.body.style.overflow='';lbIndex=-1}
 function lbStep(d){const list=sortedItems();if(!list.length)return;lbIndex=(lbIndex+d+list.length)%list.length;showLb()}
+$('#lbImg').onerror=async()=>{const x=sortedItems()[lbIndex];if(!x)return;
+try{const r=await fetch('/i/'+encodeURIComponent(x.id));if(r.status===404&&favs[x.id]){delete favs[x.id];saveFavs();toast('图片已被删除，已移出收藏');closeLb();load()}}catch(e){}};
 $('#lbClose').onclick=closeLb;
 $('#lbPrev').onclick=()=>lbStep(-1);
 $('#lbNext').onclick=()=>lbStep(1);
@@ -570,7 +578,11 @@ $('#lbImg').addEventListener('touchstart',e=>{lbTouchX=e.touches[0].clientX},{pa
 $('#lbImg').addEventListener('touchend',e=>{if(lbTouchX===null)return;const dx=e.changedTouches[0].clientX-lbTouchX;lbTouchX=null;if(Math.abs(dx)>50)lbStep(dx<0?1:-1)},{passive:true});
 /* 批量条 */
 $('#batchCopy').onclick=()=>{const urls=[...selected].map(id=>location.origin+'/i/'+id);copyText(urls.join('\n'),`已复制 ${urls.length} 个链接`)};
-$('#batchDownload').onclick=()=>{const ids=[...selected];ids.forEach((id,i)=>{setTimeout(()=>{const a=document.createElement('a');a.href='/i/'+id;a.download='';document.body.appendChild(a);a.click();a.remove()},i*400)})};
+$('#batchDownload').onclick=async()=>{const ids=[...selected];
+for(const id of ids){const x=items.find(v=>v.id===id);
+try{const r=await fetch('/i/'+encodeURIComponent(id));if(!r.ok)throw new Error('HTTP '+r.status);const b=await r.blob();const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=(x&&x.original_name)||(id+'.png');document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(a.href),5000)}
+catch(e){toast('下载失败：'+((x&&x.original_name)||id))}
+await new Promise(res=>setTimeout(res,300))}};
 $('#batchDelete').onclick=()=>deleteIds([...selected]);
 $('#batchMore').onclick=e=>{e.stopPropagation();$('#moreMenu').classList.toggle('hidden')};
 document.addEventListener('click',()=>$('#moreMenu').classList.add('hidden'));
@@ -618,7 +630,8 @@ $$('.nav-it').forEach(b=>b.onclick=()=>{$$('.nav-it').forEach(x=>x.classList.rem
 const v=b.dataset.view;['home','manage','stats','settings'].forEach(k=>$('#view-'+k).classList.toggle('hidden',k!==v));
 if(v==='manage')render();if(v==='stats')loadStats();if(v==='settings')loadTgSettings();window.scrollTo({top:0})});
 async function boot(){
-  if(token){try{const t=await fetch('/api/images?limit=1',{headers:headers()});if(t.ok){showApp();return}}catch(e){}}
+  // token 校验：只有 401 才说明凭证失效、回登录页；网络抖动等其他失败直接进应用，列表里会显示具体错误
+  if(token){try{const t=await fetch('/api/images?limit=1',{headers:headers()});if(t.ok){showApp();return}if(t.status!==401){showApp();return}}catch(e){showApp();return}}
   try{const s=await (await fetch('/api/auth/status')).json();
     if(s.setupRequired){$('#loginPanel').classList.add('hidden');$('#setupPanel').classList.remove('hidden')}
     else{$('#setupPanel').classList.add('hidden');$('#loginPanel').classList.remove('hidden')}
