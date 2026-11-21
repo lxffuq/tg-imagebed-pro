@@ -114,7 +114,7 @@ html.dark .notice.ok{background:#12351f;color:#86efac}
 .nav-it svg{width:23px;height:23px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
 .nav-it.active{color:var(--accent)}
 .nav-it.active::after{content:"";width:34px;height:3px;border-radius:3px;background:var(--accent);margin-top:2px}
-.toast{position:fixed;left:50%;bottom:calc(var(--nav-h) + 70px);transform:translateX(-50%);background:rgba(0,0,0,.82);color:#fff;padding:10px 18px;border-radius:999px;font-size:13.5px;z-index:50;display:none;white-space:nowrap;max-width:92vw;overflow:hidden;text-overflow:ellipsis}
+.toast{position:fixed;left:50%;bottom:calc(var(--nav-h) + 70px);transform:translateX(-50%);background:rgba(0,0,0,.82);color:#fff;padding:10px 18px;border-radius:999px;font-size:13.5px;z-index:80;display:none;white-space:nowrap;max-width:92vw;overflow:hidden;text-overflow:ellipsis}
 .toast.show{display:block}
 #lightbox{position:fixed;inset:0;z-index:60;background:rgba(4,7,16,.93);display:flex;flex-direction:column;align-items:center;justify-content:center;padding:18px}
 #lbImg{max-width:100%;max-height:66vh;object-fit:contain;border-radius:12px;box-shadow:0 12px 40px rgba(0,0,0,.5)}
@@ -507,7 +507,7 @@ function lbStep(d){const list=sortedItems();if(!list.length)return;lbIndex=(lbIn
 $('#lbClose').onclick=closeLb;
 $('#lbPrev').onclick=()=>lbStep(-1);
 $('#lbNext').onclick=()=>lbStep(1);
-$('#lbCopy').onclick=()=>{const x=sortedItems()[lbIndex];if(x)copyText(location.origin+'/i/'+x.id,'链接已复制')};
+$('#lbCopy').onclick=e=>{const x=sortedItems()[lbIndex];if(!x)return;copyText(location.origin+'/i/'+x.id,'链接已复制');const b=e.currentTarget;b.textContent='已复制';setTimeout(()=>b.textContent='复制链接',1500)};
 $('#lbDel').onclick=()=>{const x=sortedItems()[lbIndex];if(!x)return;const id=x.id;closeLb();deleteIds([id])};
 $('#lightbox').addEventListener('click',e=>{if(e.target.id==='lightbox')closeLb()});
 document.addEventListener('keydown',e=>{if(lbIndex<0)return;if(e.key==='Escape')closeLb();else if(e.key==='ArrowLeft')lbStep(-1);else if(e.key==='ArrowRight')lbStep(1)});
